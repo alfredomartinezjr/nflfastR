@@ -627,7 +627,7 @@ calculate_player_stats_gamescript <- function(pbp, weekly = FALSE, simple = FALS
       ),
     fantasy_points_ppr = .data$fantasy_points_std + .data$receptions,
     fantasy_points_halfppr = .data$fantasy_points_std + (0.5 * .data$receptions),
-    fantasy_points_custom = fantasy_points_halfppr +
+    fantasy_points_custom = .data$fantasy_points_halfppr +
       (0.5 * .data$rushing_first_downs) + (0.5 * .data$receiving_first_downs)
   ) %>%
     dplyr::arrange(.data$player_id, .data$season, .data$week, .data$gamescript)
