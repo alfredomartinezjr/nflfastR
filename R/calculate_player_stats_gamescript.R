@@ -11,138 +11,15 @@
 #' pbp_2023 <- nflfastR::load_pbp(2023) %>%
 #'   dplyr::filter(week <= 16)
 #' offplayer_pts <- pbp_2023 %>%
-#'   nflfastR::calculate_player_stats()
+#'   nflfastR::calculate_player_stats_gamescript()
 calculate_player_stats_gamescript <- function(pbp, weekly = FALSE, simple = FALSE) {
   rlang::check_installed("nflreadr (>= 1.3.0)", "to join player information.")
-  # custom mode function from https://stackoverflow.com/questions/2547402/is-there-a-built-in-function-for-finding-the-mode/8189441
-  custom_mode <- function(x, na.rm = TRUE) {
-    if(na.rm){x <- x[!is.na(x)]}
-    ux <- unique(x)
-    return(ux[which.max(tabulate(match(x, ux)))])
-  }
 
-  add_dakota <- function(add_to_this, pbp, weekly) {
-    dakota_model <- NULL
-    con <- url("https://github.com/nflverse/nflfastR-data/blob/master/models/dakota_model.Rdata?raw=true")
-    try(load(con), silent = TRUE)
-    close(con)
-
-    if (is.null(dakota_model)) {
-      user_message("This function needs to download the model data from GitHub. Please check your Internet connection and try again!", "oops")
-      return(add_to_this)
-    }
-
-    if (!"id" %in% names(pbp)) pbp <- clean_pbp(pbp)
-    if (!"qb_epa" %in% names(pbp)) pbp <- add_qb_epa(pbp)
-
-    suppressMessages({
-      df <- pbp %>%
-        dplyr::filter(.data$pass == 1 | .data$rush == 1) %>%
-        dplyr::filter(!is.na(.data$posteam) & !is.na(.data$qb_epa) & !is.na(.data$id) & !is.na(.data$down)) %>%
-        dplyr::mutate(epa = dplyr::if_else(.data$qb_epa < -4.5, -4.5, .data$qb_epa)) %>%
-        decode_player_ids()
-    })
-
-    if (isTRUE(weekly)) {
-      relevant_players <- add_to_this %>%
-        dplyr::filter(.data$attempts >= 5) %>%
-        dplyr::mutate(filter_id = paste(.data$player_id, .data$season, .data$week, sep = "_")) %>%
-        dplyr::pull(.data$filter_id)
-
-      model_data <- df %>%
-        dplyr::group_by(.data$id, .data$week, .data$season) %>%
-        dplyr::summarize(
-          n_plays = n(),
-          epa_per_play = sum(.data$epa) / .data$n_plays,
-          cpoe = mean(.data$cpoe, na.rm = TRUE)
-        ) %>%
-        dplyr::ungroup() %>%
-        dplyr::mutate(cpoe = dplyr::if_else(is.na(.data$cpoe), 0, .data$cpoe)) %>%
-        dplyr::rename("player_id" = "id") %>%
-        dplyr::mutate(filter_id = paste(.data$player_id, .data$season, .data$week, sep = "_")) %>%
-        dplyr::filter(.data$filter_id %in% relevant_players)
-
-      model_data$dakota <- mgcv::predict.gam(dakota_model, model_data) %>% as.vector()
-
-      out <- add_to_this %>%
-        dplyr::left_join(
-          model_data %>%
-            dplyr::select("player_id", "week", "season", "dakota"),
-          by = c("player_id", "week", "season")
-        )
-    } else if (isFALSE(weekly)) {
-      relevant_players <- add_to_this %>%
-        dplyr::filter(.data$attempts >= 5) %>%
-        dplyr::pull(.data$player_id)
-
-      model_data <- df %>%
-        dplyr::group_by(.data$id) %>%
-        dplyr::summarize(
-          n_plays = n(),
-          epa_per_play = sum(.data$epa) / .data$n_plays,
-          cpoe = mean(.data$cpoe, na.rm = TRUE)
-        ) %>%
-        dplyr::ungroup() %>%
-        dplyr::mutate(cpoe = dplyr::if_else(is.na(.data$cpoe), 0, .data$cpoe)) %>%
-        dplyr::rename("player_id" = "id") %>%
-        dplyr::filter(.data$player_id %in% relevant_players)
-
-      model_data$dakota <- mgcv::predict.gam(dakota_model, model_data) %>% as.vector()
-
-      out <- add_to_this %>%
-        dplyr::left_join(
-          model_data %>%
-            dplyr::select("player_id", "dakota"),
-          by = "player_id"
-        )
-    }
-    return(out)
-  }
-
-  #adds gamescript info
-  # "1 - Trailing Big" : Team is down by at least 9 pts
-  # "2 - Trailing": Team is dowm between 4-8 pts
-  # "3 - Neutral": Team is either up or down 3 pts
-  # "4 - Leading": Team is up between 4-8 pts
-  # "5 - Leading Big": Team is up by at least 9 pts
-  calculateGameScript <- function(score_differential_col) {
-    gamescript <- NA
-    i <- 1
-    for (j in score_differential_col) {
-      if (is.na(j)) {
-        gamescript[i] <- NA
-      } else if (j > 8) {
-        gamescript[i] <- "5 - Leading Big"
-      } else if(j > 3 & j < 9) {
-        gamescript[i] <- "4 - Leading"
-      } else if(j > -4 & j < 4) {
-        gamescript[i] <- "3 - Neutral"
-      } else if(j > -9 & j < -3) {
-        gamescript[i] <- "2 - Trailing"
-      } else if (j < -8) {
-        gamescript[i] <- "1 - Trailing Big"
-      }
-      i <- i + 1
-    }
-    return(gamescript)
-  }
   pbp$gamescript <- calculateGameScript(pbp$score_differential)
 
   #accounts for lateral plays
-  mult_lats <- nflreadr::rds_from_url("https://github.com/nflverse/nflverse-data/releases/download/misc/multiple_lateral_yards.rds") %>%
-    dplyr::mutate(season = substr(.data$game_id, 1, 4) %>% as.integer(),
-                  week = substr(.data$game_id, 6, 7) %>% as.integer()) %>%
-    dplyr::filter(.data$yards != 0) %>%
-    dplyr::group_by(.data$game_id,
-                    .data$play_id) %>%
-    dplyr::slice(seq_len(dplyr::n() - 1)) %>%
-    dplyr::ungroup() %>%
-    dplyr::group_by(.data$season,
-                    .data$week,
-                    .data$type,
-                    .data$gsis_player_id) %>%
-    dplyr::summarise(yards = sum(.data$yards)) %>%
-    dplyr::ungroup()
+  mult_lats <- load_multi_laterals()
+
   #grabs only football plays
   suppressMessages({
     data <- pbp %>%
