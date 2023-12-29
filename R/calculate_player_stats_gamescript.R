@@ -8,19 +8,32 @@
 #' @export
 #'
 #' @examples
+#' \donttest{
 #' pbp_2023 <- nflfastR::load_pbp(2023) %>%
 #'   dplyr::filter(week <= 16)
 #' offplayer_pts <- pbp_2023 %>%
 #'   nflfastR::calculate_player_stats_gamescript()
+#'   }
 calculate_player_stats_gamescript <- function(pbp, weekly = FALSE, simple = FALSE) {
   rlang::check_installed("nflreadr (>= 1.3.0)", "to join player information.")
 
+
+# Clean up pbp data frame -----------------------------------------------------
+  # adds column to pbp with special teams info, if missing
+  if (!"special" %in% names(pbp)) {
+    pbp <- pbp %>%
+      dplyr::mutate(special = dplyr::if_else(.data$play_type %in%
+                                               c("extra_point", "field_goal",
+                                                 "kickoff", "punt"),
+                                             1, 0))
+  }
+
   pbp$gamescript <- calculateGameScript(pbp$score_differential)
 
-  #accounts for lateral plays
-  mult_lats <- load_multi_laterals()
-
-  #grabs only football plays
+  s_type <- pbp %>% dplyr::select("season", "season_type",
+                                  "week") %>% dplyr::distinct()
+# Creates the data frame to be used for aggregating game stats ----------------
+  # filters pbp data frame down to only football plays
   suppressMessages({
     data <- pbp %>%
       dplyr::filter(!is.na(.data$down),
@@ -39,85 +52,27 @@ calculate_player_stats_gamescript <- function(pbp, weekly = FALSE, simple = FALS
                     "lateral_receiver_player_id") %>%
       decode_player_ids()
   })
-  #special teams info
-  if (!"special" %in% names(pbp)) {
-    pbp <- pbp %>%
-      dplyr::mutate(special = dplyr::if_else(.data$play_type %in%
-                                               c("extra_point", "field_goal",
-                                                 "kickoff", "punt"),
-                                             1, 0))
-  }
-  s_type <- pbp %>% dplyr::select("season", "season_type",
-                                  "week") %>% dplyr::distinct()
 
+  # accounts for lateral plays
+  mult_lats <- load_multi_laterals()
   # creates data frame of players
   player_info <- nflreadr::load_players() %>%
     dplyr::select(player_id = "gsis_id", player_display_name = "display_name",
                   player_name = "short_name", "position", "position_group",
                   headshot_url = "headshot")
-  # dataframe of info for running backs & related
+  # creates data frame of info for running backs & related
   racr_ids <- player_info %>%
     dplyr::filter(.data$position %in% c("RB", "FB", "HB")) %>%
     dplyr::select(gsis_id = "player_id")
 
+
+
+
   # creates stats table for passers
-  pass_df <- data %>% dplyr::filter(.data$play_type %in% c("pass", "qb_spike")) %>%
-    dplyr::group_by(.data$passer_player_id,
-                    .data$week,
-                    .data$season,
-                    .data$gamescript) %>%
-    dplyr::summarize(passing_yards_after_catch = sum((.data$passing_yards - .data$air_yards) * .data$complete_pass, na.rm = TRUE),
-                     name_pass = dplyr::first(.data$passer_player_name),
-                     team_pass = dplyr::first(.data$posteam),
-                     opp_pass = dplyr::first(.data$defteam),
-                     passing_yards = sum(.data$passing_yards, na.rm = TRUE),
-                     passing_tds = sum(.data$touchdown == 1 &
-                                         .data$td_team == .data$posteam &
-                                         .data$complete_pass == 1),
-                     interceptions = sum(.data$interception),
-                     attempts = sum(.data$complete_pass == 1 | .data$incomplete_pass == 1 | .data$interception == 1),
-                     completions = sum(.data$complete_pass == 1),
-                     sack_fumbles = sum(.data$fumble == 1 & .data$fumbled_1_player_id == .data$passer_player_id),
-                     sack_fumbles_lost = sum(.data$fumble_lost == 1 &
-                                               .data$fumbled_1_player_id == .data$passer_player_id &
-                                               .data$fumble_recovery_1_team != .data$posteam),
-                     passing_air_yards = sum(.data$air_yards, na.rm = TRUE),
-                     sacks = sum(.data$sack),
-                     sack_yards = -1 * sum(.data$yards_gained * .data$sack),
-                     passing_first_downs = sum(.data$first_down_pass),
-                     passing_epa = sum(.data$qb_epa, na.rm = TRUE),
-                     pacr = .data$passing_yards / .data$passing_air_yards,
-                     pacr = dplyr::case_when(is.nan(.data$pacr) ~ NA_real_,
-                                             .data$passing_air_yards <= 0 ~ 0,
-                                             TRUE ~ .data$pacr),
-    ) %>%
-    dplyr::rename(player_id = "passer_player_id") %>%
-    dplyr::ungroup()
-  if (isTRUE(weekly))
-    pass_df <- add_dakota(pass_df, pbp = pbp, weekly = weekly)
-  pass_two_points <- two_points %>%
-    dplyr::filter(.data$pass_attempt ==  1) %>%
-    dplyr::group_by(.data$passer_player_id,
-                    .data$week,
-                    .data$season,
-                    .data$gamescript) %>%
-    dplyr::summarise(name_pass = custom_mode(.data$passer_player_name),
-                     team_pass = custom_mode(.data$posteam),
-                     opp_pass = custom_mode(.data$defteam),
-                     passing_2pt_conversions = dplyr::n()) %>%
-    dplyr::rename(player_id = "passer_player_id") %>%
-    dplyr::ungroup()
-  pass_df <- pass_df %>%
-    dplyr::full_join(pass_two_points,
-                     by = c("player_id", "week", "season", "gamescript",
-                            "name_pass", "team_pass", "opp_pass")) %>%
-    dplyr::mutate(passing_2pt_conversions = dplyr::if_else(is.na(.data$passing_2pt_conversions),
-                                                           0L,
-                                                           .data$passing_2pt_conversions)) %>%
-    dplyr::filter(!is.na(.data$player_id))
+  pass_df <- build_stats_passing(pbp, data, two_points, weekly)
   pass_df_nas <- is.na(pass_df)
   epa_index <- which(dimnames(pass_df_nas)[[2]] %in% c("passing_epa",
-                                                       "dakota", "pacr"))
+                                                        "dakota", "pacr"))
   pass_df_nas[, epa_index] <- c(FALSE)
   pass_df[pass_df_nas] <- 0
 
