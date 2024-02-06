@@ -22,7 +22,7 @@ Get player stats broken down by gamescript.
 \examples{
 \donttest{
 pbp_2023 <- nflfastR::load_pbp(2023) \%>\%
-  dplyr::filter(week <= 16)
+  dplyr::filter(week <= 17)
 offplayer_pts <- pbp_2023 \%>\%
   nflfastR::calculate_player_stats_gamescript()
   }
